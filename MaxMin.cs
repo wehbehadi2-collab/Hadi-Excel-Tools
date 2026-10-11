@@ -45,6 +45,12 @@ namespace Hadi.Excel
                 if (series == null)
                 {
                     Log.Write("No series selected.");
+                    System.Windows.Forms.MessageBox.Show(
+                        "Please select a chart series first.\n\n" +
+                        "Click directly on a line, marker, bar, or column that belongs to a series.",
+                        "Hadi Tools",
+                        System.Windows.Forms.MessageBoxButtons.OK,
+                        System.Windows.Forms.MessageBoxIcon.Information);
                     Log.Write("=== Toggle END (no series) ===");
                     return;
                 }
@@ -124,6 +130,116 @@ namespace Hadi.Excel
                     System.Windows.Forms.MessageBoxIcon.Error);
             }
         }
+
+        // ---------- Ribbon state queries ----------
+
+        public static bool HasSelectedSeries()
+        {
+            try
+            {
+                dynamic app = ExcelDnaUtil.Application;
+                dynamic sel = app.Selection;
+                if (sel == null) return false;
+                try
+                {
+                    object raw = ((object)sel).GetType().InvokeMember(
+                        "Values",
+                        System.Reflection.BindingFlags.GetProperty,
+                        null, sel, null);
+                    return raw != null;
+                }
+                catch { return false; }
+            }
+            catch { return false; }
+        }
+
+        public static bool IsActive(string kind)
+        {
+            try
+            {
+                dynamic app = ExcelDnaUtil.Application;
+                dynamic sel = app.Selection;
+                if (sel == null) return false;
+
+                object raw;
+                try
+                {
+                    raw = ((object)sel).GetType().InvokeMember(
+                        "Values",
+                        System.Reflection.BindingFlags.GetProperty,
+                        null, sel, null);
+                }
+                catch { return false; }
+                if (raw == null) return false;
+
+                string sname;
+                try { sname = (string)sel.Name; } catch { return false; }
+
+                dynamic chart = app.ActiveChart;
+                if (chart == null) return false;
+
+                dynamic wb = app.ActiveWorkbook;
+                if (wb == null) return false;
+
+                dynamic helper = FindHelperSheetNoCreate(wb);
+                if (helper == null) return false;
+
+                int col = FindColumnNoCreate(helper, sname + "|" + kind);
+                if (col <= 0) return false;
+
+                return HelperSeriesAtColumnExists(chart, col);
+            }
+            catch { return false; }
+        }
+
+        // ---------- Clear all highlights ----------
+
+        public static void ClearAll()
+        {
+            Log.Clear();
+            Log.Write("=== ClearAll START ===");
+
+            try
+            {
+                dynamic app = ExcelDnaUtil.Application;
+                dynamic chart = app.ActiveChart;
+
+                if (chart != null)
+                {
+                    Log.Write("Active chart — clearing chart only.");
+                    int removed = RemoveAllHelpersFromChart(chart);
+                    Log.Write($"Removed {removed} helper series from chart.");
+                }
+                else
+                {
+                    var answer = System.Windows.Forms.MessageBox.Show(
+                        "No chart is currently selected.\n\n" +
+                        "Clear ALL highlights on every chart in the active sheet?",
+                        "Hadi Tools — Clear All",
+                        System.Windows.Forms.MessageBoxButtons.YesNo,
+                        System.Windows.Forms.MessageBoxIcon.Question);
+
+                    if (answer != System.Windows.Forms.DialogResult.Yes)
+                    {
+                        Log.Write("User cancelled.");
+                        Log.Write("=== ClearAll END (cancelled) ===");
+                        return;
+                    }
+
+                    dynamic sheet = app.ActiveSheet;
+                    int removed = RemoveAllHelpersFromSheet(sheet);
+                    Log.Write($"Removed {removed} helper series from sheet.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Write("EXCEPTION: " + ex.Message);
+            }
+
+            Log.Write("=== ClearAll END ===");
+        }
+
+        // ---------- private helpers ----------
 
         private static int IndexOfMax(double[] v)
         {
@@ -320,6 +436,22 @@ namespace Hadi.Excel
             return sheet;
         }
 
+        private static dynamic FindHelperSheetNoCreate(dynamic wb)
+        {
+            try
+            {
+                dynamic sheets = wb.Worksheets;
+                int count = (int)sheets.Count;
+                for (int i = 1; i <= count; i++)
+                {
+                    dynamic s = sheets.Item(i);
+                    if ((string)s.Name == HelperSheetName) return s;
+                }
+            }
+            catch { }
+            return null;
+        }
+
         private static int FindOrCreateColumn(dynamic helper, string key)
         {
             for (int c = 1; c <= MaxHelperColumns; c++)
@@ -340,6 +472,20 @@ namespace Hadi.Excel
                 }
             }
             Log.Write("No free column.");
+            return -1;
+        }
+
+        private static int FindColumnNoCreate(dynamic helper, string key)
+        {
+            for (int c = 1; c <= MaxHelperColumns; c++)
+            {
+                try
+                {
+                    object v = helper.Cells.Item(1, c).Value2;
+                    if (v != null && v.ToString() == key) return c;
+                }
+                catch { return -1; }
+            }
             return -1;
         }
 
@@ -412,6 +558,53 @@ namespace Hadi.Excel
             catch (Exception e) { Log.Write("Remove failed: " + e.Message); }
         }
 
+        private static int RemoveAllHelpersFromChart(dynamic chart)
+        {
+            int removed = 0;
+            try
+            {
+                dynamic coll = chart.SeriesCollection();
+                int count = (int)coll.Count;
+                for (int i = count; i >= 1; i--)
+                {
+                    string f = "";
+                    try { f = (string)coll.Item(i).Formula; } catch { }
+                    if (f.Contains(HelperSheetName + "!"))
+                    {
+                        try { coll.Item(i).Delete(); removed++; }
+                        catch (Exception e) { Log.Write($"Delete chart series {i} failed: {e.Message}"); }
+                    }
+                }
+            }
+            catch (Exception e) { Log.Write("Chart clear failed: " + e.Message); }
+            return removed;
+        }
+
+        private static int RemoveAllHelpersFromSheet(dynamic sheet)
+        {
+            int total = 0;
+            try
+            {
+                dynamic cos = sheet.ChartObjects();
+                int count = (int)cos.Count;
+                Log.Write($"ChartObjects on sheet: {count}");
+                for (int i = 1; i <= count; i++)
+                {
+                    try
+                    {
+                        dynamic co = cos.Item(i);
+                        dynamic ch = co.Chart;
+                        int r = RemoveAllHelpersFromChart(ch);
+                        total += r;
+                        Log.Write($"Chart {i}: removed {r}.");
+                    }
+                    catch (Exception e) { Log.Write($"Chart {i} failed: {e.Message}"); }
+                }
+            }
+            catch (Exception e) { Log.Write("Sheet scan failed: " + e.Message); }
+            return total;
+        }
+
         private static dynamic AddHelperSeries(dynamic chart, dynamic helper, int col, int n, string key)
         {
             try
@@ -422,11 +615,7 @@ namespace Hadi.Excel
                 ns.Values = range;
                 Log.Write("Set Values.");
 
-                try
-                {
-                    ns.Name = " ";
-                    Log.Write("Set Name = ' '.");
-                }
+                try { ns.Name = " "; Log.Write("Set Name = ' '."); }
                 catch (Exception e) { Log.Write("Set Name failed: " + e.Message); }
 
                 try
@@ -438,18 +627,12 @@ namespace Hadi.Excel
                         if (leCount > 0)
                         {
                             legendEntries.Item(leCount).Delete();
-                            Log.Write("Deleted legend entry for helper series.");
+                            Log.Write("Deleted legend entry.");
                         }
                     }
-                    else
-                    {
-                        Log.Write("Chart has no legend — skipping legend entry delete.");
-                    }
+                    else Log.Write("No legend on chart.");
                 }
-                catch (Exception e)
-                {
-                    Log.Write("Legend entry delete failed: " + e.Message);
-                }
+                catch (Exception e) { Log.Write("Legend entry delete failed: " + e.Message); }
 
                 Log.Write("Added helper series.");
                 return ns;

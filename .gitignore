@@ -1,0 +1,21 @@
+# Build results
+bin/
+obj/
+Deploy/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Excel-DNA generated
+*.xll
+*.dna
+
+# Temp / logs
+*.log
+*.tmp
+
+# OS
+Thumbs.db
+Desktop.ini

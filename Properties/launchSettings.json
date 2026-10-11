@@ -1,0 +1,9 @@
+{
+  "profiles": {
+    "Excel": {
+      "commandName": "Executable",
+      "executablePath": "C:\\Program Files\\Microsoft Office\\Office15\\EXCEL.EXE",
+      "commandLineArgs": "/x \"Hadi.Excel-AddIn64.xll\""
+    }
+  }
+}

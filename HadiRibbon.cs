@@ -51,13 +51,13 @@ namespace Hadi.Excel
             try { _ribbon?.Invalidate(); } catch { }
         }
 
-        public void OnMaxClick(IRibbonControl control)
+        public void OnMaxClick(IRibbonControl control, bool pressed)
         {
             MaxMin.Toggle("Max");
             InvalidateControls();
         }
 
-        public void OnMinClick(IRibbonControl control)
+        public void OnMinClick(IRibbonControl control, bool pressed)
         {
             MaxMin.Toggle("Min");
             InvalidateControls();

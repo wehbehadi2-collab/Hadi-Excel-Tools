@@ -1,4 +1,5 @@
-﻿using System;
+﻿
+using System;
 using ExcelDna.Integration.CustomUI;
 
 namespace Hadi.Excel
@@ -13,6 +14,7 @@ namespace Hadi.Excel
   <ribbon>
     <tabs>
       <tab id='hadiTab' label='Hadi Tools'>
+
         <group id='maxMinGroup' label='Max / Min'>
           <toggleButton id='btnMax' label='Max' size='large'
                         onAction='OnMaxClick'
@@ -20,6 +22,7 @@ namespace Hadi.Excel
                         imageMso='ArrowUp'
                         screentip='Highlight the maximum point'
                         supertip='Toggle a red ring on the maximum point of the selected series. Updates live as data changes.' />
+
           <toggleButton id='btnMin' label='Min' size='large'
                         onAction='OnMinClick'
                         getPressed='GetMinPressed'
@@ -27,6 +30,7 @@ namespace Hadi.Excel
                         screentip='Highlight the minimum point'
                         supertip='Toggle a blue ring on the minimum point of the selected series. Updates live as data changes.' />
         </group>
+
         <group id='actionsGroup' label='Actions'>
           <button id='btnClearAll' label='Clear All' size='large'
                   onAction='OnClearAllClick'
@@ -34,6 +38,15 @@ namespace Hadi.Excel
                   screentip='Clear highlights'
                   supertip='If a chart is selected, clears all highlights on that chart. Otherwise asks whether to clear highlights on every chart in the active sheet.' />
         </group>
+
+        <group id='waterCadGroup' label='WaterCAD'>
+          <button id='btnReadExcelTable' label='Read Table' size='large'
+                  onAction='OnReadExcelTableClick'
+                  imageMso='TableSelect'
+                  screentip='Select and read an Excel table'
+                  supertip='Select a range of cells and preview its headers and values.' />
+        </group>
+
       </tab>
     </tabs>
   </ribbon>
@@ -69,7 +82,15 @@ namespace Hadi.Excel
             InvalidateControls();
         }
 
-        public bool GetMaxPressed(IRibbonControl control) => MaxMin.IsActive("Max");
-        public bool GetMinPressed(IRibbonControl control) => MaxMin.IsActive("Min");
+        public bool GetMaxPressed(IRibbonControl control)
+            => MaxMin.IsActive("Max");
+
+        public bool GetMinPressed(IRibbonControl control)
+            => MaxMin.IsActive("Min");
+
+        public void OnReadExcelTableClick(IRibbonControl control)
+        {
+            ExcelTableReader.ReadAndPreview();
+        }
     }
 }

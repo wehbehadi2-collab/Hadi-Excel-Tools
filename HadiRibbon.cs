@@ -45,6 +45,11 @@ namespace Hadi.Excel
                   imageMso='TableSelect'
                   screentip='Select and read an Excel table'
                   supertip='Select a range of cells and preview its headers and values.' />
+          <button id='btnReadJunctions' label='Read Junctions' size='large'
+                  onAction='OnReadJunctionsClick'
+                  imageMso='ShapeOval'
+                  screentip='Read and map junction data'
+                  supertip='Read junction labels, elevations, and optional X/Y coordinates from Excel.' />
         </group>
 
       </tab>
@@ -91,6 +96,11 @@ namespace Hadi.Excel
         public void OnReadExcelTableClick(IRibbonControl control)
         {
             ExcelTableReader.ReadAndPreview();
+        }
+
+        public void OnReadJunctionsClick(IRibbonControl control)
+        {
+            ExcelTableReader.ReadJunctionsAndPreview();
         }
     }
 }

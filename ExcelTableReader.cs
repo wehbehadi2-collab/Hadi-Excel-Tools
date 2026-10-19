@@ -81,6 +81,60 @@ namespace Hadi.Excel
 
         // Reads the selected Excel range and returns reusable data.
         // Returns null if the user cancels the selection.
+        public static void ReadJunctionsAndPreview()
+        {
+            try
+            {
+                TableData table = ReadSelectedTable();
+
+                if (table == null)
+                    return;
+
+                List<MappedJunction> junctions;
+                List<string> errors;
+
+                bool success = JunctionTableMapper.Map(
+                    table,
+                    out junctions,
+                    out errors);
+
+                if (!success)
+                {
+                    ShowErrors(
+                        errors,
+                        "Junction Table Mapping",
+                        "The selected table could not be mapped");
+
+                    ShowPreview(table);
+                    return;
+                }
+                string outputPath = JunctionCSVExporter.Export(junctions);
+
+                MessageBox.Show(
+                      "Junction mapping and CSV export successful.\n\n"
+                      + "Mapped junctions: " + junctions.Count
+                      + "\nCoordinates generated automatically: "
+                      + junctions.FindAll(
+                       j => j.CoordinatesGenerated).Count
+                      + "\n\nCSV saved to:\n" + outputPath,
+                      "Junction Table Mapper",
+                      MessageBoxButtons.OK,
+                      MessageBoxIcon.Information);
+
+                ShowPreview(table);
+                ShowMappedJunctionPreview(junctions);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    "Could not read or map the junction table."
+                    + "\n\n" + ex.Message,
+                    "Junction Table Mapper",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
         public static TableData ReadSelectedTable()
         {
             dynamic excel = ExcelDnaUtil.Application;
@@ -320,6 +374,64 @@ namespace Hadi.Excel
             MessageBox.Show(
                 report.ToString(),
                 "Mapped Pipe Preview",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+
+
+        private static void ShowMappedJunctionPreview(
+            List<MappedJunction> junctions)
+        {
+            StringBuilder report = new StringBuilder();
+
+            report.AppendLine("Junction mapping successful.");
+            report.AppendLine();
+            report.AppendLine(
+                "Mapped junctions: " + junctions.Count);
+            report.AppendLine();
+
+            int count = Math.Min(junctions.Count, 10);
+
+            for (int i = 0; i < count; i++)
+            {
+                MappedJunction junction = junctions[i];
+
+                report.AppendLine(
+                    "Junction " + (i + 1) + ": "
+                    + junction.Label);
+
+                report.AppendLine(
+                    "  Elevation: "
+                    + junction.Elevation.ToString(
+                        "G", CultureInfo.CurrentCulture));
+
+                report.AppendLine(
+                    "  X: "
+                    + junction.X.ToString(
+                        "G", CultureInfo.CurrentCulture));
+
+                report.AppendLine(
+                    "  Y: "
+                    + junction.Y.ToString(
+                        "G", CultureInfo.CurrentCulture));
+
+                report.AppendLine(
+                    "  Coordinates generated: "
+                    + junction.CoordinatesGenerated);
+
+                report.AppendLine();
+            }
+
+            if (junctions.Count > count)
+            {
+                report.AppendLine(
+                    "... and " + (junctions.Count - count)
+                    + " more junctions.");
+            }
+
+            MessageBox.Show(
+                report.ToString(),
+                "Mapped Junction Preview",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
         }

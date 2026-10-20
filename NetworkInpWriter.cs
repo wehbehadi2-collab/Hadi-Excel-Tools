@@ -1,4 +1,5 @@
-﻿using System;
+﻿
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -17,7 +18,7 @@ namespace Hadi.Excel
 
         public string FileName { get; set; } = "WaterCAD_Network.inp";
 
-        // Darcy-Weisbach roughness in millimetres.
+        // Darcy-Weisbach absolute roughness in millimetres.
         public double DefaultPipeRoughnessMm { get; set; } = 0.1;
 
         public bool DefaultMissingDemandToZero { get; set; } = true;
@@ -31,18 +32,39 @@ namespace Hadi.Excel
     {
         public string FilePath { get; set; } = "";
         public List<string> Warnings { get; } = new List<string>();
+        public Dictionary<string, int> ElementCounts { get; } =
+            new Dictionary<string, int>(
+                StringComparer.OrdinalIgnoreCase);
+
         public int ElementCount { get; set; }
 
         public string BuildReport()
         {
+            return BuildReport("INP export report");
+        }
+
+        public string BuildReport(string heading)
+        {
             var report = new StringBuilder();
 
-            report.AppendLine("INP export report");
+            report.AppendLine(heading);
             report.AppendLine();
             report.AppendLine("File: " + FilePath);
-            report.AppendLine("Elements exported: " + ElementCount);
-            report.AppendLine("Warnings: " + Warnings.Count);
+            report.AppendLine("Total elements: " + ElementCount);
             report.AppendLine();
+            report.AppendLine("ELEMENT COUNTS");
+
+            foreach (string type in NetworkInpWriter.ElementTypesForReport)
+            {
+                int count = ElementCounts.TryGetValue(type, out int value)
+                    ? value
+                    : 0;
+
+                report.AppendLine($"{type}: {count}");
+            }
+
+            report.AppendLine();
+            report.AppendLine($"Warnings: {Warnings.Count}");
 
             if (Warnings.Count == 0)
             {
@@ -65,70 +87,55 @@ namespace Hadi.Excel
             "Junction", "Reservoir", "Tank", "Pipe", "Pump", "Valve"
         };
 
+        internal static IReadOnlyList<string> ElementTypesForReport =>
+            ElementTypes;
+
+        private static readonly Dictionary<string, HashSet<string>>
+            ExportedFields = BuildExportedFields();
+
+        // Creates an audit without writing a file.
+        public static NetworkInpExportResult Preview(
+            List<NetworkRecord> records,
+            NetworkInpExportOptions options = null)
+        {
+            ValidateInputs(records, options);
+            options ??= new NetworkInpExportOptions();
+            ValidateOptions(options);
+
+            var result = CreateResult(records, options);
+            CollectWarnings(records, options, result);
+
+            return result;
+        }
+
         public static NetworkInpExportResult Write(
             List<NetworkRecord> records,
             NetworkInpExportOptions options = null)
         {
-            if (records == null)
-                throw new ArgumentNullException(nameof(records));
-
+            ValidateInputs(records, options);
             options ??= new NetworkInpExportOptions();
+            ValidateOptions(options);
 
-            if (options.DefaultPipeRoughnessMm <= 0
-                || double.IsNaN(options.DefaultPipeRoughnessMm)
-                || double.IsInfinity(options.DefaultPipeRoughnessMm))
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(options.DefaultPipeRoughnessMm),
-                    "Default pipe roughness must be finite and greater than zero.");
-            }
+            // Use the same audit rules for preview and final export.
+            NetworkInpExportResult result = Preview(records, options);
 
-            if (string.IsNullOrWhiteSpace(options.OutputDirectory))
-                throw new ArgumentException(
-                    "An output directory is required.", nameof(options));
-
-            if (string.IsNullOrWhiteSpace(options.FileName)
-                || !options.FileName.EndsWith(
-                    ".inp", StringComparison.OrdinalIgnoreCase)
-                || Path.GetFileName(options.FileName) != options.FileName)
-            {
-                throw new ArgumentException(
-                    "FileName must be a file name ending in .inp, without a directory.",
-                    nameof(options));
-            }
-
-            // Export only after the caller has run NetworkDataValidator.
-            // This guard prevents accidental use of an empty selection.
-            if (records.Count == 0)
-                throw new InvalidOperationException(
-                    "There are no network records to export.");
-
-            foreach (string type in ElementTypes)
-            {
-                if (records.Any(r => !ElementTypes.Contains(r.Type)
-                                     && !string.IsNullOrWhiteSpace(r.Type)))
-                {
-                    throw new InvalidOperationException(
-                        "The selection contains an unsupported element type.");
-                }
-            }
-
-            var result = new NetworkInpExportResult();
             var output = new StringBuilder();
 
             output.AppendLine("; Generated by Hadi.Excel");
-            output.AppendLine("; Review defaults and warnings before hydraulic analysis.");
+            output.AppendLine(
+                "; Review the export report before hydraulic analysis.");
             output.AppendLine();
+
             output.AppendLine("[TITLE]");
             output.AppendLine("Water distribution network");
             output.AppendLine();
 
-            WriteJunctions(output, records, options, result);
+            WriteJunctions(output, records, options);
             WriteReservoirs(output, records);
-            WriteTanks(output, records, options, result);
-            WritePipes(output, records, options, result);
-            WritePumps(output, records, options, result);
-            WriteValves(output, records, options, result);
+            WriteTanks(output, records, options);
+            WritePipes(output, records, options);
+            WritePumps(output, records, options);
+            WriteValves(output, records);
             WriteCoordinates(output, records);
 
             output.AppendLine("[OPTIONS]");
@@ -145,8 +152,8 @@ namespace Hadi.Excel
 
             Directory.CreateDirectory(options.OutputDirectory);
 
-            string fullPath = Path.Combine(
-                options.OutputDirectory, options.FileName);
+            string fullPath = Path.GetFullPath(
+                Path.Combine(options.OutputDirectory, options.FileName));
 
             File.WriteAllText(
                 fullPath,
@@ -154,16 +161,279 @@ namespace Hadi.Excel
                 new UTF8Encoding(false));
 
             result.FilePath = fullPath;
-            result.ElementCount = records.Count;
 
             return result;
+        }
+
+        private static void ValidateInputs(
+            List<NetworkRecord> records,
+            NetworkInpExportOptions options)
+        {
+            if (records == null)
+                throw new ArgumentNullException(nameof(records));
+
+            if (records.Count == 0)
+                throw new InvalidOperationException(
+                    "There are no network records to export.");
+
+            if (records.Any(r => r == null))
+                throw new InvalidOperationException(
+                    "The selection contains an empty network record.");
+
+            foreach (NetworkRecord record in records)
+            {
+                if (!ElementTypes.Contains(
+                    record.Type,
+                    StringComparer.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        $"{record.Source}: unsupported element type " +
+                        $"'{record.Type}'.");
+                }
+            }
+        }
+
+        private static void ValidateOptions(
+            NetworkInpExportOptions options)
+        {
+            if (options.DefaultPipeRoughnessMm <= 0
+                || !double.IsFinite(options.DefaultPipeRoughnessMm))
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(options.DefaultPipeRoughnessMm),
+                    "Default pipe roughness must be finite and greater than zero.");
+            }
+
+            if (string.IsNullOrWhiteSpace(options.OutputDirectory))
+            {
+                throw new ArgumentException(
+                    "An output directory is required.",
+                    nameof(options));
+            }
+
+            if (string.IsNullOrWhiteSpace(options.FileName)
+                || !options.FileName.EndsWith(
+                    ".inp", StringComparison.OrdinalIgnoreCase)
+                || Path.GetFileName(options.FileName) != options.FileName)
+            {
+                throw new ArgumentException(
+                    "FileName must be a file name ending in .inp, without a directory.",
+                    nameof(options));
+            }
+        }
+
+        private static NetworkInpExportResult CreateResult(
+            List<NetworkRecord> records,
+            NetworkInpExportOptions options)
+        {
+            var result = new NetworkInpExportResult
+            {
+                FilePath = Path.GetFullPath(
+                    Path.Combine(options.OutputDirectory, options.FileName)),
+                ElementCount = records.Count
+            };
+
+            foreach (string type in ElementTypes)
+            {
+                result.ElementCounts[type] = records.Count(
+                    r => r.Type.Equals(
+                        type, StringComparison.OrdinalIgnoreCase));
+            }
+
+            return result;
+        }
+
+        private static void CollectWarnings(
+            List<NetworkRecord> records,
+            NetworkInpExportOptions options,
+            NetworkInpExportResult result)
+        {
+            foreach (NetworkRecord record in records)
+            {
+                string id = GetId(record);
+
+                // Report defaults that the writer will apply.
+                if (record.Type.Equals("Junction",
+                    StringComparison.OrdinalIgnoreCase)
+                    && string.IsNullOrWhiteSpace(record.Get("Demand")))
+                {
+                    if (options.DefaultMissingDemandToZero)
+                    {
+                        result.Warnings.Add(
+                            $"Junction '{id}': missing Demand will default to 0 L/s.");
+                    }
+                }
+
+                if (record.Type.Equals("Pipe",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.IsNullOrWhiteSpace(record.Get("Roughness")))
+                    {
+                        result.Warnings.Add(
+                            $"Pipe '{id}': missing Roughness will default to " +
+                            $"{Format(options.DefaultPipeRoughnessMm)} mm " +
+                            "(Darcy-Weisbach).");
+                    }
+
+                    if (string.IsNullOrWhiteSpace(record.Get("Minor Loss"))
+                        && options.DefaultMissingMinorLossToZero)
+                    {
+                        result.Warnings.Add(
+                            $"Pipe '{id}': missing Minor Loss will default to 0.");
+                    }
+
+                    if (string.IsNullOrWhiteSpace(record.Get("Status"))
+                        && options.DefaultMissingPipeStatusToOpen)
+                    {
+                        result.Warnings.Add(
+                            $"Pipe '{id}': missing Status will default to OPEN.");
+                    }
+                }
+
+                if (record.Type.Equals("Valve",
+                    StringComparison.OrdinalIgnoreCase)
+                    && string.IsNullOrWhiteSpace(record.Get("Minor Loss"))
+                    && options.DefaultMissingMinorLossToZero)
+                {
+                    result.Warnings.Add(
+                        $"Valve '{id}': missing Minor Loss will default to 0.");
+                }
+
+                if (record.Type.Equals("Tank",
+                    StringComparison.OrdinalIgnoreCase)
+                    && string.IsNullOrWhiteSpace(record.Get("Minimum Volume"))
+                    && options.DefaultMissingTankMinimumVolumeToZero)
+                {
+                    result.Warnings.Add(
+                        $"Tank '{id}': missing Minimum Volume will default to 0 m³.");
+                }
+
+                if (record.Type.Equals("Pump",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.IsNullOrWhiteSpace(record.Get("Speed"))
+                        && options.DefaultMissingPumpSpeedToOne)
+                    {
+                        result.Warnings.Add(
+                            $"Pump '{id}': missing relative Speed will default to 1.");
+                    }
+
+                    WarnUndefinedReference(
+                        result, record, "Pump Curve",
+                        "pump curve definitions are not generated");
+
+                    WarnUndefinedReference(
+                        result, record, "Speed Pattern",
+                        "pattern definitions are not generated");
+                }
+
+                WarnUndefinedReference(
+                    result, record, "Demand Pattern",
+                    "pattern definitions are not generated");
+
+                WarnUndefinedReference(
+                    result, record, "Head Pattern",
+                    "pattern definitions are not generated");
+
+                WarnUndefinedReference(
+                    result, record, "Volume Curve",
+                    "curve definitions are not generated");
+
+                // Warn for recognized fields with values that are not
+                // represented in the generated INP sections.
+                foreach (NetworkParameterDefinition definition
+                    in NetworkParameterCatalog.All)
+                {
+                    if (!definition.AppliesTo(record.Type))
+                        continue;
+
+                    if (!record.AvailableFields.Contains(definition.Name))
+                        continue;
+
+                    if (string.IsNullOrWhiteSpace(
+                        record.Get(definition.Name)))
+                    {
+                        continue;
+                    }
+
+                    if (IsExported(record.Type, definition.Name))
+                        continue;
+
+                    result.Warnings.Add(
+                        $"{record.Type} '{id}': supplied field " +
+                        $"'{definition.Name}' is not exported by the current writer.");
+                }
+            }
+        }
+
+        private static void WarnUndefinedReference(
+            NetworkInpExportResult result,
+            NetworkRecord record,
+            string field,
+            string explanation)
+        {
+            string value = record.Get(field);
+
+            if (string.IsNullOrWhiteSpace(value))
+                return;
+
+            result.Warnings.Add(
+                $"{record.Type} '{GetId(record)}': '{field}' references " +
+                $"'{value}', but {explanation}.");
+        }
+
+        private static bool IsExported(string type, string field)
+        {
+            return ExportedFields.TryGetValue(
+                    type, out HashSet<string> fields)
+                && fields.Contains(field);
+        }
+
+        private static Dictionary<string, HashSet<string>>
+            BuildExportedFields()
+        {
+            var result = new Dictionary<string, HashSet<string>>(
+                StringComparer.OrdinalIgnoreCase);
+
+            AddExported(result, "Junction",
+                "Node ID", "Elevation", "Demand", "X", "Y");
+
+            AddExported(result, "Reservoir",
+                "Reservoir ID", "Head", "X", "Y");
+
+            AddExported(result, "Tank",
+                "Tank ID", "Elevation", "Initial Level",
+                "Minimum Level", "Maximum Level", "Tank Diameter",
+                "Minimum Volume", "Volume Curve", "X", "Y");
+
+            AddExported(result, "Pipe",
+                "Pipe ID", "Start Node", "End Node",
+                "Length", "Diameter", "Roughness", "Minor Loss", "Status");
+
+            AddExported(result, "Pump",
+                "Pump ID", "Start Node", "End Node",
+                "Pump Curve", "Power", "Speed", "Speed Pattern");
+
+            AddExported(result, "Valve",
+                "Valve ID", "Start Node", "End Node",
+                "Diameter", "Valve Type", "Setting", "Minor Loss");
+
+            return result;
+        }
+
+        private static void AddExported(
+            Dictionary<string, HashSet<string>> target,
+            string type,
+            params string[] fields)
+        {
+            target[type] = new HashSet<string>(
+                fields, StringComparer.OrdinalIgnoreCase);
         }
 
         private static void WriteJunctions(
             StringBuilder output,
             List<NetworkRecord> records,
-            NetworkInpExportOptions options,
-            NetworkInpExportResult result)
+            NetworkInpExportOptions options)
         {
             output.AppendLine("[JUNCTIONS]");
             output.AppendLine(";ID Elevation Demand");
@@ -172,7 +442,6 @@ namespace Hadi.Excel
             {
                 string id = Required(record, "Node ID");
                 string elevation = Number(record, "Elevation");
-
                 string demand = record.Get("Demand");
 
                 if (string.IsNullOrWhiteSpace(demand))
@@ -181,16 +450,13 @@ namespace Hadi.Excel
                         throw Missing(record, "Demand");
 
                     demand = "0";
-                    result.Warnings.Add(
-                        $"Junction '{id}': Demand defaulted to 0 L/s.");
                 }
                 else
                 {
                     demand = Number(record, "Demand");
                 }
 
-                output.AppendLine(
-                    $"{id} {elevation} {demand}");
+                output.AppendLine($"{id} {elevation} {demand}");
             }
 
             output.AppendLine();
@@ -206,8 +472,8 @@ namespace Hadi.Excel
             foreach (NetworkRecord record in OfType(records, "Reservoir"))
             {
                 output.AppendLine(
-                    $"{Required(record, "Reservoir ID")} "
-                    + $"{Number(record, "Head")}");
+                    $"{Required(record, "Reservoir ID")} " +
+                    $"{Number(record, "Head")}");
             }
 
             output.AppendLine();
@@ -216,8 +482,7 @@ namespace Hadi.Excel
         private static void WriteTanks(
             StringBuilder output,
             List<NetworkRecord> records,
-            NetworkInpExportOptions options,
-            NetworkInpExportResult result)
+            NetworkInpExportOptions options)
         {
             output.AppendLine("[TANKS]");
             output.AppendLine(
@@ -226,10 +491,8 @@ namespace Hadi.Excel
             foreach (NetworkRecord record in OfType(records, "Tank"))
             {
                 string id = Required(record, "Tank ID");
-
-                // Tank diameter is in metres, unlike pipe diameter (mm).
-                // Use the distinct Tank Diameter field to avoid unit ambiguity.
-                string diameter = Required(record, "Tank Diameter");
+                string diameter = PositiveNumber(
+                    record.Get("Tank Diameter"), record, "Tank Diameter");
 
                 string minVolume = record.Get("Minimum Volume");
 
@@ -239,24 +502,22 @@ namespace Hadi.Excel
                         throw Missing(record, "Minimum Volume");
 
                     minVolume = "0";
-                    result.Warnings.Add(
-                        $"Tank '{id}': Minimum Volume defaulted to 0 m³.");
                 }
                 else
                 {
-                    minVolume = Number(record, "Minimum Volume");
+                    minVolume = NonNegativeNumber(
+                        minVolume, record, "Minimum Volume");
                 }
 
                 string curve = record.Get("Volume Curve");
 
                 output.AppendLine(
-                    $"{id} {Number(record, "Elevation")} "
-                    + $"{Number(record, "Initial Level")} "
-                    + $"{Number(record, "Minimum Level")} "
-                    + $"{Number(record, "Maximum Level")} "
-                    + $"{PositiveNumber(diameter, record, "Tank Diameter")} "
-                    + $"{minVolume}"
-                    + (string.IsNullOrWhiteSpace(curve) ? "" : $" {curve}"));
+                    $"{id} {Number(record, "Elevation")} " +
+                    $"{Number(record, "Initial Level")} " +
+                    $"{Number(record, "Minimum Level")} " +
+                    $"{Number(record, "Maximum Level")} " +
+                    $"{diameter} {minVolume}" +
+                    (string.IsNullOrWhiteSpace(curve) ? "" : $" {curve}"));
             }
 
             output.AppendLine();
@@ -265,8 +526,7 @@ namespace Hadi.Excel
         private static void WritePipes(
             StringBuilder output,
             List<NetworkRecord> records,
-            NetworkInpExportOptions options,
-            NetworkInpExportResult result)
+            NetworkInpExportOptions options)
         {
             output.AppendLine("[PIPES]");
             output.AppendLine(
@@ -280,9 +540,6 @@ namespace Hadi.Excel
                 if (string.IsNullOrWhiteSpace(roughness))
                 {
                     roughness = Format(options.DefaultPipeRoughnessMm);
-                    result.Warnings.Add(
-                        $"Pipe '{id}': Roughness defaulted to "
-                        + $"{roughness} mm (Darcy-Weisbach).");
                 }
                 else
                 {
@@ -298,8 +555,6 @@ namespace Hadi.Excel
                         throw Missing(record, "Minor Loss");
 
                     minorLoss = "0";
-                    result.Warnings.Add(
-                        $"Pipe '{id}': Minor Loss defaulted to 0.");
                 }
                 else
                 {
@@ -315,18 +570,16 @@ namespace Hadi.Excel
                         throw Missing(record, "Status");
 
                     status = "OPEN";
-                    result.Warnings.Add(
-                        $"Pipe '{id}': Status defaulted to OPEN.");
                 }
 
                 status = NormalizePipeStatus(status, record);
 
                 output.AppendLine(
-                    $"{id} {Required(record, "Start Node")} "
-                    + $"{Required(record, "End Node")} "
-                    + $"{PositiveNumber(record.Get("Length"), record, "Length")} "
-                    + $"{PositiveNumber(record.Get("Diameter"), record, "Diameter")} "
-                    + $"{roughness} {minorLoss} {status}");
+                    $"{id} {Required(record, "Start Node")} " +
+                    $"{Required(record, "End Node")} " +
+                    $"{PositiveNumber(record.Get("Length"), record, "Length")} " +
+                    $"{PositiveNumber(record.Get("Diameter"), record, "Diameter")} " +
+                    $"{roughness} {minorLoss} {status}");
             }
 
             output.AppendLine();
@@ -335,8 +588,7 @@ namespace Hadi.Excel
         private static void WritePumps(
             StringBuilder output,
             List<NetworkRecord> records,
-            NetworkInpExportOptions options,
-            NetworkInpExportResult result)
+            NetworkInpExportOptions options)
         {
             output.AppendLine("[PUMPS]");
             output.AppendLine(";ID Node1 Node2 HEAD curve / POWER value");
@@ -351,19 +603,18 @@ namespace Hadi.Excel
                     && string.IsNullOrWhiteSpace(power))
                 {
                     throw new InvalidOperationException(
-                        $"{record.Source}: pump '{id}' needs a Pump Curve "
-                        + "or Power. No engineering value will be invented.");
+                        $"{record.Source}: pump '{id}' needs a Pump Curve " +
+                        "or Power. No engineering value will be invented.");
                 }
 
                 string speed = record.Get("Speed");
+
                 if (string.IsNullOrWhiteSpace(speed))
                 {
                     if (!options.DefaultMissingPumpSpeedToOne)
                         throw Missing(record, "Speed");
 
                     speed = "1";
-                    result.Warnings.Add(
-                        $"Pump '{id}': relative Speed defaulted to 1.");
                 }
                 else
                 {
@@ -371,18 +622,19 @@ namespace Hadi.Excel
                 }
 
                 string line =
-                    $"{id} {Required(record, "Start Node")} "
-                    + $"{Required(record, "End Node")} ";
+                    $"{id} {Required(record, "Start Node")} " +
+                    $"{Required(record, "End Node")} ";
 
                 line += !string.IsNullOrWhiteSpace(curve)
-                    ? $"HEAD {curve}"
+                    ? $"HEAD {Required(curve, record, "Pump Curve")}"
                     : $"POWER {PositiveNumber(power, record, "Power")}";
 
                 line += $" SPEED {speed}";
 
                 string pattern = record.Get("Speed Pattern");
+
                 if (!string.IsNullOrWhiteSpace(pattern))
-                    line += $" PATTERN {pattern}";
+                    line += $" PATTERN {Required(pattern, record, "Speed Pattern")}";
 
                 output.AppendLine(line);
             }
@@ -392,9 +644,7 @@ namespace Hadi.Excel
 
         private static void WriteValves(
             StringBuilder output,
-            List<NetworkRecord> records,
-            NetworkInpExportOptions options,
-            NetworkInpExportResult result)
+            List<NetworkRecord> records)
         {
             output.AppendLine("[VALVES]");
             output.AppendLine(";ID Node1 Node2 Diameter Type Setting MinorLoss");
@@ -404,16 +654,11 @@ namespace Hadi.Excel
                 string id = Required(record, "Valve ID");
                 string type = Required(record, "Valve Type").ToUpperInvariant();
                 string setting = Required(record, "Setting");
-
                 string minorLoss = record.Get("Minor Loss");
+
                 if (string.IsNullOrWhiteSpace(minorLoss))
                 {
-                    if (!options.DefaultMissingMinorLossToZero)
-                        throw Missing(record, "Minor Loss");
-
                     minorLoss = "0";
-                    result.Warnings.Add(
-                        $"Valve '{id}': Minor Loss defaulted to 0.");
                 }
                 else
                 {
@@ -421,15 +666,14 @@ namespace Hadi.Excel
                         minorLoss, record, "Minor Loss");
                 }
 
-                // GPV uses a headloss curve ID, not a numeric setting.
                 if (type != "GPV")
                     setting = NonNegativeNumber(setting, record, "Setting");
 
                 output.AppendLine(
-                    $"{id} {Required(record, "Start Node")} "
-                    + $"{Required(record, "End Node")} "
-                    + $"{PositiveNumber(record.Get("Diameter"), record, "Diameter")} "
-                    + $"{type} {setting} {minorLoss}");
+                    $"{id} {Required(record, "Start Node")} " +
+                    $"{Required(record, "End Node")} " +
+                    $"{PositiveNumber(record.Get("Diameter"), record, "Diameter")} " +
+                    $"{type} {setting} {minorLoss}");
             }
 
             output.AppendLine();
@@ -439,27 +683,25 @@ namespace Hadi.Excel
             StringBuilder output,
             List<NetworkRecord> records)
         {
-            var coordinates = OfNodeTypes(records)
-                .Where(r =>
-                    !string.IsNullOrWhiteSpace(r.Get("X"))
-                    && !string.IsNullOrWhiteSpace(r.Get("Y")))
-                .ToList();
-
             output.AppendLine("[COORDINATES]");
             output.AppendLine(";Node X Y");
 
-            foreach (NetworkRecord record in coordinates)
+            foreach (NetworkRecord record in OfNodeTypes(records)
+                .Where(r =>
+                    !string.IsNullOrWhiteSpace(r.Get("X"))
+                    && !string.IsNullOrWhiteSpace(r.Get("Y"))))
             {
                 output.AppendLine(
-                    $"{Required(record, GetNodeIdField(record))} "
-                    + $"{Number(record, "X")} {Number(record, "Y")}");
+                    $"{Required(record, GetNodeIdField(record))} " +
+                    $"{Number(record, "X")} {Number(record, "Y")}");
             }
 
             output.AppendLine();
         }
 
         private static IEnumerable<NetworkRecord> OfType(
-            List<NetworkRecord> records, string type)
+            List<NetworkRecord> records,
+            string type)
         {
             return records.Where(
                 r => r.Type.Equals(
@@ -469,10 +711,10 @@ namespace Hadi.Excel
         private static IEnumerable<NetworkRecord> OfNodeTypes(
             List<NetworkRecord> records)
         {
-            return records.Where(
-                r => r.Type == "Junction"
-                  || r.Type == "Reservoir"
-                  || r.Type == "Tank");
+            return records.Where(r =>
+                r.Type.Equals("Junction", StringComparison.OrdinalIgnoreCase)
+                || r.Type.Equals("Reservoir", StringComparison.OrdinalIgnoreCase)
+                || r.Type.Equals("Tank", StringComparison.OrdinalIgnoreCase));
         }
 
         private static string GetNodeIdField(NetworkRecord record)
@@ -484,18 +726,35 @@ namespace Hadi.Excel
                 case "Tank": return "Tank ID";
                 default:
                     throw new InvalidOperationException(
-                    "Unsupported node type: " + record.Type);
+                        "Unsupported node type: " + record.Type);
+            }
+        }
+
+        private static string GetId(NetworkRecord record)
+        {
+            switch (record.Type)
+            {
+                case "Junction": return record.Get("Node ID");
+                case "Reservoir": return record.Get("Reservoir ID");
+                case "Tank": return record.Get("Tank ID");
+                case "Pipe": return record.Get("Pipe ID");
+                case "Pump": return record.Get("Pump ID");
+                case "Valve": return record.Get("Valve ID");
+                default: return "";
             }
         }
 
         private static string Required(
-            NetworkRecord record, string field)
+            NetworkRecord record,
+            string field)
         {
             return Required(record.Get(field), record, field);
         }
 
         private static string Required(
-            string value, NetworkRecord record, string field)
+            string value,
+            NetworkRecord record,
+            string field)
         {
             if (string.IsNullOrWhiteSpace(value))
                 throw Missing(record, field);
@@ -504,21 +763,25 @@ namespace Hadi.Excel
         }
 
         private static InvalidOperationException Missing(
-            NetworkRecord record, string field)
+            NetworkRecord record,
+            string field)
         {
             return new InvalidOperationException(
-                $"{record.Source}: {record.Type} '{record.Type}' "
-                + $"is missing required export field '{field}'.");
+                $"{record.Source}: {record.Type} '{GetId(record)}' " +
+                $"is missing required export field '{field}'.");
         }
 
         private static string Number(
-            NetworkRecord record, string field)
+            NetworkRecord record,
+            string field)
         {
             return Format(ParseNumber(record.Get(field), record, field));
         }
 
         private static string PositiveNumber(
-            string value, NetworkRecord record, string field)
+            string value,
+            NetworkRecord record,
+            string field)
         {
             double number = ParseNumber(value, record, field);
 
@@ -530,7 +793,9 @@ namespace Hadi.Excel
         }
 
         private static string NonNegativeNumber(
-            string value, NetworkRecord record, string field)
+            string value,
+            NetworkRecord record,
+            string field)
         {
             double number = ParseNumber(value, record, field);
 
@@ -542,26 +807,28 @@ namespace Hadi.Excel
         }
 
         private static double ParseNumber(
-            string value, NetworkRecord record, string field)
+            string value,
+            NetworkRecord record,
+            string field)
         {
-            if (!double.TryParse(
-                    value,
-                    NumberStyles.Float,
-                    CultureInfo.InvariantCulture,
-                    out double number)
-                && !double.TryParse(
+            bool parsed = double.TryParse(
+                value,
+                NumberStyles.Float,
+                CultureInfo.InvariantCulture,
+                out double number);
+
+            if (!parsed)
+            {
+                parsed = double.TryParse(
                     value,
                     NumberStyles.Float,
                     CultureInfo.CurrentCulture,
-                    out number))
-            {
-                throw new InvalidOperationException(
-                    $"{record.Source}: '{field}' is not a valid number.");
+                    out number);
             }
 
-            if (double.IsNaN(number) || double.IsInfinity(number))
+            if (!parsed || !double.IsFinite(number))
                 throw new InvalidOperationException(
-                    $"{record.Source}: '{field}' must be finite.");
+                    $"{record.Source}: '{field}' is not a valid finite number.");
 
             return number;
         }
@@ -572,13 +839,16 @@ namespace Hadi.Excel
         }
 
         private static string NormalizePipeStatus(
-            string value, NetworkRecord record)
+            string value,
+            NetworkRecord record)
         {
             string status = value.Trim().ToUpperInvariant();
 
             if (status != "OPEN" && status != "CLOSED" && status != "CV")
+            {
                 throw new InvalidOperationException(
                     $"{record.Source}: invalid pipe status '{value}'.");
+            }
 
             return status;
         }

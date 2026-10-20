@@ -1,4 +1,5 @@
-﻿using System;
+﻿
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -30,6 +31,17 @@ namespace Hadi.Excel
 
     public static class NetworkDataValidator
     {
+        private static readonly HashSet<string> SupportedTypes =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "Junction",
+                "Reservoir",
+                "Tank",
+                "Pipe",
+                "Pump",
+                "Valve"
+            };
+
         public static string Validate(List<NetworkRecord> records)
         {
             if (records == null)
@@ -37,10 +49,20 @@ namespace Hadi.Excel
 
             var errors = new List<string>();
 
+            ValidateElementTypes(records, errors);
             ValidateIdentifiers(records, errors);
 
             foreach (NetworkRecord record in records)
             {
+                if (record == null)
+                {
+                    errors.Add("The selection contains a null network record.");
+                    continue;
+                }
+
+                if (!SupportedTypes.Contains(record.Type ?? ""))
+                    continue;
+
                 ValidateRequiredFields(record, errors);
                 ValidateAvailableFields(record, errors);
                 ValidateElementRules(record, errors);
@@ -52,7 +74,6 @@ namespace Hadi.Excel
 
             report.AppendLine("Network validation report");
             report.AppendLine();
-
             report.AppendLine($"Records checked: {records.Count}");
 
             foreach (string type in new[]
@@ -62,7 +83,11 @@ namespace Hadi.Excel
             })
             {
                 report.AppendLine(
-                    $"{type}s: {records.Count(r => r.Type == type)}");
+                    $"{type}s: {records.Count(r =>
+                        r != null &&
+                        string.Equals(
+                            r.Type, type,
+                            StringComparison.OrdinalIgnoreCase))}");
             }
 
             report.AppendLine();
@@ -84,10 +109,42 @@ namespace Hadi.Excel
 
             report.AppendLine();
             report.AppendLine(
-                "This validator checks recognized fields. "
-                + "It does not yet generate an INP file.");
+                "Validation checks recognized fields and network "
+                + "connections before INP export.");
 
             return report.ToString();
+        }
+
+        private static void ValidateElementTypes(
+            List<NetworkRecord> records,
+            List<string> errors)
+        {
+            for (int i = 0; i < records.Count; i++)
+            {
+                NetworkRecord record = records[i];
+
+                if (record == null)
+                {
+                    errors.Add(
+                        $"Record {i + 1}: the network record is null.");
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(record.Type))
+                {
+                    errors.Add(
+                        $"{GetSource(record)}: element type is missing.");
+                    continue;
+                }
+
+                if (!SupportedTypes.Contains(record.Type))
+                {
+                    errors.Add(
+                        $"{GetSource(record)}: unsupported element type "
+                        + $"'{record.Type}'. Supported types are Junction, "
+                        + "Reservoir, Tank, Pipe, Pump, and Valve.");
+                }
+            }
         }
 
         private static void ValidateIdentifiers(
@@ -99,10 +156,18 @@ namespace Hadi.Excel
 
             foreach (NetworkRecord record in records)
             {
-                string id = GetId(record);
+                if (record == null ||
+                    !SupportedTypes.Contains(record.Type ?? ""))
+                {
+                    continue;
+                }
+
+                string id = GetId(record)?.Trim();
 
                 if (string.IsNullOrWhiteSpace(id))
                     continue;
+
+                ValidateIdentifierSyntax(record, id, errors);
 
                 // Node IDs must be unique across junctions, reservoirs,
                 // and tanks. Link IDs must be unique across pipes,
@@ -113,14 +178,46 @@ namespace Hadi.Excel
                 if (ids.TryGetValue(key, out NetworkRecord previous))
                 {
                     errors.Add(
-                        $"{record.Source}: duplicate {group.ToLowerInvariant()} "
-                        + $"ID '{id}' (also used by {previous.Type} at "
-                        + $"{previous.Source}).");
+                        $"{GetSource(record)}: duplicate "
+                        + $"{group.ToLowerInvariant()} ID '{id}' "
+                        + $"(also used by {previous.Type} at "
+                        + $"{GetSource(previous)}).");
                 }
                 else
                 {
                     ids[key] = record;
                 }
+            }
+        }
+
+        private static void ValidateIdentifierSyntax(
+            NetworkRecord record,
+            string id,
+            List<string> errors)
+        {
+            // INP element IDs are written as individual tokens.
+            // Whitespace and semicolons can break or truncate a record.
+            if (id.Any(char.IsWhiteSpace))
+            {
+                errors.Add(
+                    $"{GetSource(record)}: ID '{id}' contains whitespace. "
+                    + "Use an ID without spaces or tabs.");
+            }
+
+            if (id.Contains(';') || id.Contains('[') || id.Contains(']'))
+            {
+                errors.Add(
+                    $"{GetSource(record)}: ID '{id}' contains a reserved "
+                    + "character (;, [, or ]). Remove that character.");
+            }
+
+            // EPANET-compatible INP identifiers are limited to 31 characters.
+            if (id.Length > 31)
+            {
+                errors.Add(
+                    $"{GetSource(record)}: ID '{id}' has {id.Length} "
+                    + "characters. Use an ID no longer than 31 characters "
+                    + "for EPANET-compatible INP export.");
             }
         }
 
@@ -134,7 +231,7 @@ namespace Hadi.Excel
                 if (string.IsNullOrWhiteSpace(record.Get(field)))
                 {
                     errors.Add(
-                        $"{record.Source}: {record.Type} "
+                        $"{GetSource(record)}: {record.Type} "
                         + $"'{GetId(record)}' requires {field}.");
                 }
             }
@@ -144,7 +241,7 @@ namespace Hadi.Excel
                 && string.IsNullOrWhiteSpace(record.Get("Power")))
             {
                 errors.Add(
-                    $"{record.Source}: pump '{GetId(record)}' "
+                    $"{GetSource(record)}: pump '{GetId(record)}' "
                     + "requires either Pump Curve or Power.");
             }
         }
@@ -153,7 +250,7 @@ namespace Hadi.Excel
             NetworkRecord record,
             List<string> errors)
         {
-            HashSet<string> required = new HashSet<string>(
+            var required = new HashSet<string>(
                 NetworkParameterCatalog.RequiredFields(record.Type),
                 StringComparer.OrdinalIgnoreCase);
 
@@ -168,12 +265,12 @@ namespace Hadi.Excel
 
                 string value = record.Get(definition.Name);
 
-                // Required fields are already checked separately.
+                // Required fields are checked separately.
                 if (required.Contains(definition.Name))
                     continue;
 
                 // A pump can use either a curve or power. A blank Power
-                // cell is acceptable if a pump curve is provided.
+                // cell is acceptable when a pump curve is supplied.
                 if (record.Type == "Pump"
                     && definition.Name == "Power"
                     && string.IsNullOrWhiteSpace(value)
@@ -182,15 +279,12 @@ namespace Hadi.Excel
                     continue;
                 }
 
-                // Some optional fields can be left blank. Others, such as
-                // roughness or minor loss when their column exists, need
-                // a valid value for each applicable record.
                 if (string.IsNullOrWhiteSpace(value))
                 {
                     if (definition.RequiredWhenColumnExists)
                     {
                         errors.Add(
-                            $"{record.Source}: {record.Type} "
+                            $"{GetSource(record)}: {record.Type} "
                             + $"'{GetId(record)}' has a blank "
                             + $"{definition.Name} value.");
                     }
@@ -257,7 +351,7 @@ namespace Hadi.Excel
             if (!valid)
             {
                 errors.Add(
-                    $"{record.Source}: {record.Type} '{GetId(record)}' "
+                    $"{GetSource(record)}: {record.Type} '{GetId(record)}' "
                     + $"has an invalid {definition.Name} value '{value}'.");
             }
         }
@@ -267,9 +361,7 @@ namespace Hadi.Excel
             List<string> errors)
         {
             if (record.Type == "Tank")
-            {
                 CheckLevelOrder(record, errors);
-            }
         }
 
         private static void CheckLevelOrder(
@@ -288,21 +380,21 @@ namespace Hadi.Excel
             if (hasInitial && hasMinimum && minimum > initial)
             {
                 errors.Add(
-                    $"{record.Source}: tank '{GetId(record)}' has a "
+                    $"{GetSource(record)}: tank '{GetId(record)}' has a "
                     + "Minimum Level greater than its Initial Level.");
             }
 
             if (hasInitial && hasMaximum && initial > maximum)
             {
                 errors.Add(
-                    $"{record.Source}: tank '{GetId(record)}' has an "
+                    $"{GetSource(record)}: tank '{GetId(record)}' has an "
                     + "Initial Level greater than its Maximum Level.");
             }
 
             if (hasMinimum && hasMaximum && minimum >= maximum)
             {
                 errors.Add(
-                    $"{record.Source}: tank '{GetId(record)}' must have "
+                    $"{GetSource(record)}: tank '{GetId(record)}' must have "
                     + "a Minimum Level lower than its Maximum Level.");
             }
         }
@@ -313,25 +405,27 @@ namespace Hadi.Excel
         {
             var nodeIds = new HashSet<string>(
                 records
-                    .Where(r => IsNode(r.Type))
+                    .Where(r => r != null && IsNode(r.Type))
                     .Select(GetId)
-                    .Where(id => !string.IsNullOrWhiteSpace(id)),
+                    .Where(id => !string.IsNullOrWhiteSpace(id))
+                    .Select(id => id.Trim()),
                 StringComparer.OrdinalIgnoreCase);
 
             foreach (NetworkRecord link in records.Where(
-                         r => r.Type == "Pipe"
-                           || r.Type == "Pump"
-                           || r.Type == "Valve"))
+                         r => r != null &&
+                              (r.Type == "Pipe"
+                               || r.Type == "Pump"
+                               || r.Type == "Valve")))
             {
                 string id = GetId(link);
-                string start = link.Get("Start Node");
-                string end = link.Get("End Node");
+                string start = link.Get("Start Node")?.Trim();
+                string end = link.Get("End Node")?.Trim();
 
-                CheckEndpoint(link, id, "Start Node",
-                    start, nodeIds, errors);
+                CheckEndpoint(
+                    link, id, "Start Node", start, nodeIds, errors);
 
-                CheckEndpoint(link, id, "End Node",
-                    end, nodeIds, errors);
+                CheckEndpoint(
+                    link, id, "End Node", end, nodeIds, errors);
 
                 if (!string.IsNullOrWhiteSpace(start)
                     && !string.IsNullOrWhiteSpace(end)
@@ -340,7 +434,7 @@ namespace Hadi.Excel
                         StringComparison.OrdinalIgnoreCase))
                 {
                     errors.Add(
-                        $"{link.Source}: {link.Type.ToLowerInvariant()} "
+                        $"{GetSource(link)}: {link.Type.ToLowerInvariant()} "
                         + $"'{id}' starts and ends at the same node.");
                 }
             }
@@ -360,7 +454,7 @@ namespace Hadi.Excel
             if (!nodeIds.Contains(node))
             {
                 errors.Add(
-                    $"{link.Source}: {link.Type.ToLowerInvariant()} "
+                    $"{GetSource(link)}: {link.Type.ToLowerInvariant()} "
                     + $"'{id}' references unknown {field} '{node}'.");
             }
         }
@@ -391,6 +485,13 @@ namespace Hadi.Excel
                 default:
                     return "";
             }
+        }
+
+        private static string GetSource(NetworkRecord record)
+        {
+            return string.IsNullOrWhiteSpace(record?.Source)
+                ? "Network record"
+                : record.Source;
         }
 
         private static bool IsValidStatus(

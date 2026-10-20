@@ -50,6 +50,14 @@ namespace Hadi.Excel
                   imageMso='ShapeOval'
                   screentip='Read and map junction data'
                   supertip='Read junction labels, elevations, and optional X/Y coordinates from Excel.' />
+          <button id='btnReadNetworkTables'
+                  label='Read Network Tables'
+                  size='large'
+                  onAction='OnReadNetworkTablesClick'
+                  imageMso='TableSelect'
+                  screentip='Read multiple network tables'
+                  supertip='Select multiple Excel table ranges for network import.' />
+
         </group>
 
       </tab>
@@ -101,6 +109,11 @@ namespace Hadi.Excel
         public void OnReadJunctionsClick(IRibbonControl control)
         {
             ExcelTableReader.ReadJunctionsAndPreview();
+        }
+
+        public void OnReadNetworkTablesClick(IRibbonControl control)
+        {
+            NetworkInpWorkflow.ReadNetworkTables();
         }
     }
 }

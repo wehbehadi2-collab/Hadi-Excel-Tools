@@ -555,7 +555,7 @@ namespace Hadi.Excel
             if (double.TryParse(
                     value,
                     NumberStyles.Float,
-                    CultureInfo.CurrentCulture,
+                    CultureInfo.CurrentCulture, 
                     out number))
             {
                 return !double.IsNaN(number)

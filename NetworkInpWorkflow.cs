@@ -15,7 +15,8 @@ namespace Hadi.Excel
             {
                 dynamic excel = ExcelDnaUtil.Application;
 
-                // Type 8 asks the user to select an Excel range.
+                // Ask the user to select the Excel network data,
+                // including its headers.
                 dynamic selectedRange = excel.InputBox(
                     "Select the Excel cells containing your network data, "
                     + "including the headers. You may select one rectangle "
@@ -27,7 +28,6 @@ namespace Hadi.Excel
                     return;
 
                 var records = new List<NetworkRecord>();
-                var extractionReport = new StringBuilder();
 
                 dynamic areas = selectedRange.Areas;
                 int areaCount = (int)areas.Count;
@@ -38,33 +38,26 @@ namespace Hadi.Excel
 
                     object[,] values = ToMatrix(area.Value2);
 
-                    extractionReport.AppendLine(
-                        $"Selection area {i}");
-                    extractionReport.AppendLine(
-                        NetworkDataExtractor.Extract(values));
-                    extractionReport.AppendLine();
-
                     records.AddRange(
                         NetworkDataExtractor.ExtractRecords(values));
                 }
 
+                // Stop if no supported network records were found.
                 if (records.Count == 0)
                 {
                     MessageBox.Show(
-                        extractionReport
-                            + Environment.NewLine
-                            + "No network records were recognized. "
-                            + "The INP file was not generated.",
-                        "Network Data",
+                        "No network records were recognized.\n\n"
+                        + "Check that your selection contains supported "
+                        + "network data and the correct column headers.\n\n"
+                        + "The INP file was not generated.",
+                        "No Network Data",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning);
 
                     return;
                 }
 
-                string layoutReport =
-                    NetworkAutoLayout.GenerateCoordinates(records);
-
+                // Validate before generating coordinates or exporting.
                 string validationReport =
                     NetworkDataValidator.Validate(records);
 
@@ -72,22 +65,23 @@ namespace Hadi.Excel
                         "VALIDATION PASSED",
                         StringComparison.OrdinalIgnoreCase))
                 {
+                    string errorMessage =
+                        BuildValidationErrorMessage(validationReport);
+
                     MessageBox.Show(
-                        extractionReport
-                            + Environment.NewLine
-                            + layoutReport
-                            + Environment.NewLine
-                            + validationReport
-                            + Environment.NewLine
-                            + "Export cancelled because validation failed.",
-                        "Network Validation",
+                        errorMessage,
+                        "Network Validation Failed",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning);
 
                     return;
                 }
 
-                // Only valid records are sent to the INP writer.
+                // Only valid records proceed to coordinate generation.
+                NetworkAutoLayout.GenerateCoordinates(records);
+
+                // Preserve the existing automatic export behavior.
+                // The same file is overwritten on each successful export.
                 NetworkInpExportResult exportResult =
                     NetworkInpWriter.Write(
                         records,
@@ -103,7 +97,7 @@ namespace Hadi.Excel
                             // Darcy-Weisbach absolute roughness in mm.
                             DefaultPipeRoughnessMm = 0.1,
 
-                            // Defaults are explicit and configurable.
+                            // Existing export defaults.
                             DefaultMissingDemandToZero = true,
                             DefaultMissingMinorLossToZero = true,
                             DefaultMissingPipeStatusToOpen = true,
@@ -111,19 +105,8 @@ namespace Hadi.Excel
                             DefaultMissingTankMinimumVolumeToZero = true
                         });
 
-                var finalReport = new StringBuilder();
-
-                finalReport.AppendLine(extractionReport.ToString());
-                finalReport.AppendLine(layoutReport);
-                finalReport.AppendLine(validationReport);
-                finalReport.AppendLine();
-                finalReport.AppendLine(exportResult.BuildReport());
-
-                MessageBox.Show(
-                    finalReport.ToString(),
-                    "Network INP Export",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
+                // Intentionally no success popup.
+                // The writer creates/replaces the INP file automatically.
             }
             catch (Exception ex)
             {
@@ -136,6 +119,64 @@ namespace Hadi.Excel
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
+        }
+
+        private static string BuildValidationErrorMessage(
+            string validationReport)
+        {
+            var message = new StringBuilder();
+
+            message.AppendLine(
+                "The network contains errors that must be fixed "
+                + "before it can be exported.");
+
+            message.AppendLine();
+            message.AppendLine("Validation errors:");
+
+            string[] lines = validationReport.Split(
+                new[] { "\r\n", "\n" },
+                StringSplitOptions.None);
+
+            int errorCount = 0;
+
+            foreach (string line in lines)
+            {
+                string trimmedLine = line.Trim();
+
+                if (trimmedLine.StartsWith(
+                        "- ",
+                        StringComparison.Ordinal))
+                {
+                    message.AppendLine(trimmedLine);
+                    errorCount++;
+                }
+            }
+
+            if (errorCount == 0)
+            {
+                // Fallback in case the validator's report format changes.
+                message.AppendLine();
+                message.AppendLine(
+                    "Validation failed, but no individual error "
+                    + "details could be extracted.");
+
+                message.AppendLine();
+                message.AppendLine(
+                    "Please check the selected network data.");
+            }
+
+            message.AppendLine();
+            message.AppendLine(
+                $"Total errors: {errorCount}");
+
+            message.AppendLine();
+            message.AppendLine(
+                "Correct these errors in Excel and run the tool again.");
+
+            message.AppendLine(
+                "The INP file was not generated.");
+
+            return message.ToString();
         }
 
         private static object[,] ToMatrix(object value)
@@ -162,8 +203,7 @@ namespace Hadi.Excel
                 return result;
             }
 
-            // Excel may return a scalar rather than a two-dimensional
-            // array if the user selects only one cell.
+            // Excel may return a scalar for a single selected cell.
             return new[,] { { value } };
         }
     }

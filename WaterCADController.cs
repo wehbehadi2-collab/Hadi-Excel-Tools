@@ -6,23 +6,35 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 
-namespace WaterCadTest48
+namespace Hadi.Excel
 {
-    internal class WaterCADController
+    /// <summary>
+    /// Starts WaterCAD if necessary and attempts to restore
+    /// and activate its main window.
+    /// </summary>
+    internal static class WaterCADController
     {
         private const string WaterCADPath =
             @"C:\Program Files (x86)\Bentley\WaterCAD\x64\WaterCAD.exe";
 
+        private const string ProcessName = "WaterCAD";
+
         private const int SW_RESTORE = 9;
-        private const int SW_SHOW = 5;
+        private const int GW_OWNER = 4;
+
+        private const int StartupTimeoutMilliseconds = 30000;
+        private const int WindowTimeoutMilliseconds = 15000;
+        private const int PollIntervalMilliseconds = 250;
 
         [DllImport("user32.dll")]
         private static extern bool EnumWindows(
-            EnumWindowsProc callback, IntPtr lParam);
+            EnumWindowsProc callback,
+            IntPtr lParam);
 
         [DllImport("user32.dll")]
         private static extern uint GetWindowThreadProcessId(
-            IntPtr hWnd, out uint processId);
+            IntPtr hWnd,
+            out uint processId);
 
         [DllImport("user32.dll")]
         private static extern bool IsWindowVisible(IntPtr hWnd);
@@ -32,180 +44,361 @@ namespace WaterCadTest48
 
         [DllImport("user32.dll")]
         private static extern bool ShowWindowAsync(
-            IntPtr hWnd, int nCmdShow);
-
-        [DllImport("user32.dll")]
-        private static extern bool ShowWindow(
-            IntPtr hWnd, int nCmdShow);
-
-        [DllImport("user32.dll")]
-        private static extern bool BringWindowToTop(IntPtr hWnd);
+            IntPtr hWnd,
+            int nCmdShow);
 
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
 
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetWindow(
+            IntPtr hWnd,
+            int uCmd);
+
+        [DllImport(
+            "user32.dll",
+            CharSet = CharSet.Unicode,
+            SetLastError = true)]
         private static extern int GetWindowText(
-            IntPtr hWnd, StringBuilder text, int maxCount);
+            IntPtr hWnd,
+            StringBuilder text,
+            int maxCount);
 
         private delegate bool EnumWindowsProc(
-            IntPtr hWnd, IntPtr lParam);
+            IntPtr hWnd,
+            IntPtr lParam);
 
-        private class WindowInfo
+        /// <summary>
+        /// Ensures WaterCAD is running, then attempts to activate it.
+        /// This method does not import an INP file.
+        /// </summary>
+        public static WaterCADActivationResult EnsureRunningAndActivate()
         {
-            public IntPtr Handle;
-            public string Title = "";
-        }
+            Process process = null;
+            bool startedNewProcess = false;
 
-        public static void Run()
-        {
-            Console.WriteLine();
-            Console.WriteLine("=== WaterCAD Controller ===");
-
-            Process waterCAD = FindWaterCAD();
-
-            if (waterCAD == null)
+            try
             {
-                Console.WriteLine("Starting WaterCAD...");
+                // Prefer an existing WaterCAD instance.
+                process = FindWaterCADProcess();
 
-                if (!File.Exists(WaterCADPath))
+                if (process == null)
                 {
-                    Console.WriteLine(
-                        "WaterCAD.exe not found: " + WaterCADPath);
-                    return;
-                }
-
-                try
-                {
-                    Process.Start(new ProcessStartInfo
+                    if (!File.Exists(WaterCADPath))
                     {
-                        FileName = WaterCADPath,
-                        UseShellExecute = true
-                    });
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine(ex.Message);
-                    return;
+                        return WaterCADActivationResult.Failure(
+                            "WaterCAD.exe was not found at:\n" +
+                            WaterCADPath);
+                    }
+
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo
+                        {
+                            FileName = WaterCADPath,
+                            UseShellExecute = true
+                        });
+
+                        startedNewProcess = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        return WaterCADActivationResult.Failure(
+                            "WaterCAD could not be started.\n\n" +
+                            ex.Message);
+                    }
+
+                    // Wait for the application process to appear.
+                    process = WaitForWaterCADProcess(
+                        StartupTimeoutMilliseconds);
+
+                    if (process == null)
+                    {
+                        return WaterCADActivationResult.Failure(
+                            "WaterCAD was started, but its process " +
+                            "could not be detected within 30 seconds.");
+                    }
                 }
 
-                for (int i = 0; i < 60; i++)
-                {
-                    Thread.Sleep(500);
-                    waterCAD = FindWaterCAD();
+                int processId = process.Id;
 
-                    if (waterCAD != null)
+                // Wait for the main application window.
+                IntPtr windowHandle = IntPtr.Zero;
+                string windowTitle = string.Empty;
+
+                Stopwatch stopwatch = Stopwatch.StartNew();
+
+                while (stopwatch.ElapsedMilliseconds <
+                       WindowTimeoutMilliseconds)
+                {
+                    // Prefer a WaterCAD window belonging to the
+                    // selected process.
+                    windowHandle = FindMainWindow(
+                        processId,
+                        out windowTitle);
+
+                    if (windowHandle != IntPtr.Zero)
                         break;
+
+                    Thread.Sleep(PollIntervalMilliseconds);
                 }
+
+                if (windowHandle == IntPtr.Zero)
+                {
+                    return WaterCADActivationResult.Failure(
+                        "WaterCAD is running, but its main window " +
+                        "could not be found.\n\n" +
+                        "The application may still be loading.");
+                }
+
+                bool wasMinimized = IsIconic(windowHandle);
+
+                // Restore the window if minimized. Calling this
+                // for a non-minimized window is also harmless.
+                ShowWindowAsync(windowHandle, SW_RESTORE);
+
+                // Allow Windows time to process the restore request.
+                Thread.Sleep(300);
+
+                // Ask Windows to bring WaterCAD to the foreground.
+                bool activationAccepted =
+                    SetForegroundWindow(windowHandle);
+
+                // Check which window actually has foreground focus.
+                Thread.Sleep(300);
+
+                bool isForeground =
+                    GetForegroundWindow() == windowHandle;
+
+                string message;
+
+                if (isForeground)
+                {
+                    message = startedNewProcess
+                        ? "WaterCAD was started and activated successfully."
+                        : "The existing WaterCAD window was activated successfully.";
+                }
+                else if (wasMinimized || IsIconic(windowHandle))
+                {
+                    message =
+                        "WaterCAD was found, but Windows did not " +
+                        "confirm that its window was restored.";
+                }
+                else
+                {
+                    message =
+                        "WaterCAD is running and its window was found, " +
+                        "but it did not become the foreground window. " +
+                        "Windows may be restricting foreground activation.";
+                }
+
+                return new WaterCADActivationResult
+                {
+                    Success = true,
+                    StartedNewProcess = startedNewProcess,
+                    ActivationAccepted = activationAccepted,
+                    IsForeground = isForeground,
+                    ProcessId = processId,
+                    WindowTitle = windowTitle,
+                    Message = message
+                };
             }
-            else
+            catch (Exception ex)
             {
-                Console.WriteLine("Existing WaterCAD process found.");
+                return WaterCADActivationResult.Failure(
+                    "An unexpected error occurred while activating WaterCAD.\n\n" +
+                    ex.Message);
             }
-
-            if (waterCAD == null)
+            finally
             {
-                Console.WriteLine("Could not find WaterCAD process.");
-                return;
+                process?.Dispose();
             }
-
-            WindowInfo window = FindWaterCADWindow(waterCAD.Id);
-
-            for (int i = 0; window == null && i < 20; i++)
-            {
-                Thread.Sleep(500);
-                window = FindWaterCADWindow(waterCAD.Id);
-            }
-
-            if (window == null)
-            {
-                Console.WriteLine(
-                    "No titled WaterCAD window was found.");
-                return;
-            }
-
-            Console.WriteLine("Window title: " + window.Title);
-            Console.WriteLine(
-                "Was minimized: " + IsIconic(window.Handle));
-
-            // Explicitly request restoration.
-            ShowWindowAsync(window.Handle, SW_RESTORE);
-            ShowWindow(window.Handle, SW_RESTORE);
-            Thread.Sleep(1000);
-
-            // Also request that the window move to the foreground.
-            BringWindowToTop(window.Handle);
-            bool activated = SetForegroundWindow(window.Handle);
-
-            Thread.Sleep(500);
-
-            Console.WriteLine(
-                "Minimized after restore: " + IsIconic(window.Handle));
-
-            Console.WriteLine(
-                activated
-                    ? "Windows accepted the activation request."
-                    : "Windows did not confirm foreground activation.");
-
-            Console.WriteLine("Controller finished.");
         }
 
-        private static Process FindWaterCAD()
+
+        private static Process FindWaterCADProcess()
         {
             Process[] processes =
-                Process.GetProcessesByName("WaterCAD");
+                Process.GetProcessesByName(ProcessName);
 
-            foreach (Process process in processes)
+            Process selected = null;
+
+            try
             {
-                try
+                IntPtr foreground = GetForegroundWindow();
+
+                GetWindowThreadProcessId(
+                    foreground,
+                    out uint foregroundProcessId);
+
+                // Prefer the WaterCAD process currently in the foreground.
+                foreach (Process candidate in processes)
                 {
-                    if (!process.HasExited)
-                        return process;
+                    try
+                    {
+                        if (!candidate.HasExited &&
+                            candidate.Id == (int)foregroundProcessId)
+                        {
+                            selected = candidate;
+                            break;
+                        }
+                    }
+                    catch
+                    {
+                        // The process may have exited while being inspected.
+                    }
                 }
-                catch
+
+                // Otherwise prefer a process with a main window.
+                if (selected == null)
                 {
-                    // Process may have exited.
+                    foreach (Process candidate in processes)
+                    {
+                        try
+                        {
+                            if (!candidate.HasExited &&
+                                candidate.MainWindowHandle != IntPtr.Zero)
+                            {
+                                selected = candidate;
+                                break;
+                            }
+                        }
+                        catch
+                        {
+                            // Continue checking.
+                        }
+                    }
                 }
+
+                // Last resort: use any process that is still running.
+                if (selected == null)
+                {
+                    foreach (Process candidate in processes)
+                    {
+                        try
+                        {
+                            if (!candidate.HasExited)
+                            {
+                                selected = candidate;
+                                break;
+                            }
+                        }
+                        catch
+                        {
+                            // Continue checking.
+                        }
+                    }
+                }
+
+                return selected;
+            }
+            finally
+            {
+                // Dispose every process object except the one returned
+                // to the caller.
+                foreach (Process candidate in processes)
+                {
+                    if (!ReferenceEquals(candidate, selected))
+                        candidate.Dispose();
+                }
+            }
+        }
+
+
+        private static Process WaitForWaterCADProcess(int timeoutMilliseconds)
+        {
+            Stopwatch stopwatch = Stopwatch.StartNew();
+
+            while (stopwatch.ElapsedMilliseconds < timeoutMilliseconds)
+            {
+                Process process = FindWaterCADProcess();
+
+                if (process != null)
+                    return process;
+
+                Thread.Sleep(PollIntervalMilliseconds);
             }
 
             return null;
         }
 
-        private static WindowInfo FindWaterCADWindow(int processId)
+        private static IntPtr FindMainWindow(
+            int processId,
+            out string windowTitle)
         {
-            WindowInfo best = null;
+            IntPtr bestHandle = IntPtr.Zero;
+            string bestTitle = string.Empty;
 
             EnumWindows((hWnd, lParam) =>
             {
                 GetWindowThreadProcessId(
-                    hWnd, out uint windowProcessId);
+                    hWnd,
+                    out uint ownerProcessId);
 
-                if (windowProcessId != (uint)processId)
+                if (ownerProcessId != (uint)processId)
+                    return true;
+
+                if (!IsWindowVisible(hWnd))
+                    return true;
+
+                // Avoid selecting owned dialogs when a top-level
+                // application window is available.
+                if (GetWindow(hWnd, GW_OWNER) != IntPtr.Zero)
                     return true;
 
                 StringBuilder title = new StringBuilder(512);
-                GetWindowText(hWnd, title, title.Capacity);
 
-                string windowTitle = title.ToString().Trim();
+                GetWindowText(
+                    hWnd,
+                    title,
+                    title.Capacity);
 
-                if (IsWindowVisible(hWnd) &&
-                    windowTitle.Length > 0)
-                {
-                    // Prefer a titled main window.
-                    best = new WindowInfo
-                    {
-                        Handle = hWnd,
-                        Title = windowTitle
-                    };
+                string currentTitle = title.ToString().Trim();
 
-                    // Stop at the first titled window for this process.
-                    return false;
-                }
+                if (currentTitle.Length == 0)
+                    return true;
 
-                return true;
+                bestHandle = hWnd;
+                bestTitle = currentTitle;
+
+                // Stop once a suitable top-level window is found.
+                return false;
             }, IntPtr.Zero);
 
-            return best;
+            windowTitle = bestTitle;
+            return bestHandle;
+        }
+    }
+
+    /// <summary>
+    /// Describes the outcome of a WaterCAD activation attempt.
+    /// </summary>
+    internal sealed class WaterCADActivationResult
+    {
+        public bool Success { get; set; }
+
+        public bool StartedNewProcess { get; set; }
+
+        public bool ActivationAccepted { get; set; }
+
+        public bool IsForeground { get; set; }
+
+        public int ProcessId { get; set; }
+
+        public string WindowTitle { get; set; } = string.Empty;
+
+        public string Message { get; set; } = string.Empty;
+
+        public static WaterCADActivationResult Failure(string message)
+        {
+            return new WaterCADActivationResult
+            {
+                Success = false,
+                Message = message
+            };
         }
     }
 }
